@@ -1,0 +1,230 @@
+name: Publish
+
+on:
+  schedule:
+    # Daily. qBittorrent has no webhook we can subscribe to, so this polls.
+    - cron: "15 8 * * *"
+  workflow_dispatch:
+    inputs:
+      qbittorrent_version:
+        description: "qBittorrent version, such as 5.2.3. Empty uses the latest stable release."
+        required: false
+        type: string
+      force:
+        description: "Rebuild even when the published tag already matches"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: publish-image
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      publish: ${{ steps.resolve.outputs.publish }}
+      qbt_version: ${{ steps.resolve.outputs.qbt_version }}
+      qbt_tag: ${{ steps.resolve.outputs.qbt_tag }}
+      libtorrent_tag: ${{ steps.resolve.outputs.libtorrent_tag }}
+      alpine_digest: ${{ steps.resolve.outputs.alpine_digest }}
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install skopeo
+        run: sudo apt-get update && sudo apt-get install -y skopeo
+
+      - name: Resolve versions
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_VERSION: ${{ github.event.inputs.qbittorrent_version }}
+          FORCE: ${{ github.event.inputs.force }}
+          IMAGE: ghcr.io/${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          auth=(-H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json")
+
+          if [[ -n "${REQUESTED_VERSION}" ]]; then
+            version="${REQUESTED_VERSION#release-}"
+            if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "Invalid qBittorrent version: ${REQUESTED_VERSION}" >&2
+              exit 1
+            fi
+          else
+            tag=$(curl -fsSL "${auth[@]}" \
+              "https://api.github.com/repos/qbittorrent/qBittorrent/releases?per_page=30" \
+              | jq -r '[.[] | select(.prerelease == false) | select(.tag_name | test("alpha|beta|rc"; "i") | not)][0].tag_name')
+            if [[ -z "${tag}" || "${tag}" == "null" ]]; then
+              echo "No stable qBittorrent release found" >&2
+              exit 1
+            fi
+            version="${tag#release-}"
+          fi
+
+          libtorrent_tag=$(curl -fsSL "${auth[@]}" \
+            "https://api.github.com/repos/arvidn/libtorrent/releases?per_page=100" \
+            | jq -r '[.[] | select(.prerelease == false) | select(.target_commitish == "RC_2_0")][0].tag_name')
+          if [[ ! "${libtorrent_tag}" =~ ^v2\.0\.[0-9]+$ ]]; then
+            echo "No stable libtorrent RC_2_0 release found (got '${libtorrent_tag}')" >&2
+            exit 1
+          fi
+
+          alpine_digest=$(docker buildx imagetools inspect alpine:3 | awk '/^Digest:/ {print $2; exit}')
+          if [[ ! "${alpine_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "Could not resolve alpine:3 digest (got '${alpine_digest}')" >&2
+            exit 1
+          fi
+
+          publish=true
+          if [[ "${FORCE}" != "true" ]]; then
+            if cfg=$(skopeo inspect "docker://${IMAGE}:${version}" 2>/dev/null); then
+              have_version=$(jq -r '.Labels["org.opencontainers.image.version"] // empty' <<<"${cfg}")
+              have_libtorrent=$(jq -r '.Labels["io.github.jslay88.libtorrent-version"] // empty' <<<"${cfg}")
+              have_digest=$(jq -r '.Labels["org.opencontainers.image.base.digest"] // empty' <<<"${cfg}")
+              if [[ "${have_version}" == "${version}" && "${have_libtorrent}" == "${libtorrent_tag}" && "${have_digest}" == "${alpine_digest}" ]]; then
+                publish=false
+              fi
+            fi
+          fi
+
+          echo "qBittorrent ${version}, libtorrent ${libtorrent_tag}, alpine ${alpine_digest}, publish ${publish}"
+          {
+            echo "publish=${publish}"
+            echo "qbt_version=${version}"
+            echo "qbt_tag=release-${version}"
+            echo "libtorrent_tag=${libtorrent_tag}"
+            echo "alpine_digest=${alpine_digest}"
+          } >> "${GITHUB_OUTPUT}"
+
+  build:
+    needs: check
+    if: needs.check.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Gateway parser
+        run: bash tests/test-natpmp-gateway.sh
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}
+          QBT_VERSION: ${{ needs.check.outputs.qbt_version }}
+          QBT_TAG: ${{ needs.check.outputs.qbt_tag }}
+          LIBTORRENT_TAG: ${{ needs.check.outputs.libtorrent_tag }}
+          ALPINE_DIGEST: ${{ needs.check.outputs.alpine_digest }}
+        run: |
+          set -euo pipefail
+          docker build \
+            --build-arg "ALPINE_IMAGE=alpine:3@${ALPINE_DIGEST}" \
+            --build-arg "QBITTORRENT_TAG=${QBT_TAG}" \
+            --build-arg "QBITTORRENT_VERSION=${QBT_VERSION}" \
+            --build-arg "LIBTORRENT_TAG=${LIBTORRENT_TAG}" \
+            --build-arg "ALPINE_DIGEST=${ALPINE_DIGEST}" \
+            -t "${IMAGE}:${QBT_VERSION}" \
+            -t "${IMAGE}:latest" \
+            .
+
+      - name: Check the binary
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}
+          QBT_VERSION: ${{ needs.check.outputs.qbt_version }}
+        run: |
+          set -euo pipefail
+          version_out=$(docker run --rm --entrypoint qbittorrent-nox "${IMAGE}:${QBT_VERSION}" --version)
+          echo "${version_out}"
+          echo "${version_out}" | grep -F "v${QBT_VERSION}"
+          docker run --rm --entrypoint ldd "${IMAGE}:${QBT_VERSION}" /usr/bin/qbittorrent-nox | tee /tmp/ldd.txt
+          if grep -q 'not found' /tmp/ldd.txt; then
+            echo "qbittorrent-nox is missing shared libraries" >&2
+            exit 1
+          fi
+
+      - name: WebUI smoke test
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}
+          QBT_VERSION: ${{ needs.check.outputs.qbt_version }}
+        run: |
+          set -euo pipefail
+          docker rm -f qbt-smoke >/dev/null 2>&1 || true
+          docker run -d --name qbt-smoke \
+            -p 127.0.0.1:8080:8080 \
+            -e VPN_ENABLED=no \
+            -e PUID=1000 \
+            -e PGID=1000 \
+            "${IMAGE}:${QBT_VERSION}"
+          ok=0
+          for _ in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/ || true)
+            if [[ "${code}" == "200" || "${code}" == "401" || "${code}" == "403" ]]; then
+              ok=1
+              break
+            fi
+            sleep 2
+          done
+          docker logs qbt-smoke || true
+          docker rm -f qbt-smoke >/dev/null 2>&1 || true
+          if [[ "${ok}" != "1" ]]; then
+            echo "WebUI did not start listening" >&2
+            exit 1
+          fi
+
+      - name: Push
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}
+          QBT_VERSION: ${{ needs.check.outputs.qbt_version }}
+        run: |
+          set -euo pipefail
+          docker push "${IMAGE}:${QBT_VERSION}"
+          docker push "${IMAGE}:latest"
+
+      - name: Make the package public
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api --method PUT \
+            -H "Accept: application/vnd.github+json" \
+            "/user/packages/container/docker-qbittorrentvpn/visibility" \
+            -f visibility=public
+
+      - name: GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          QBT_VERSION: ${{ needs.check.outputs.qbt_version }}
+          LIBTORRENT_TAG: ${{ needs.check.outputs.libtorrent_tag }}
+          ALPINE_DIGEST: ${{ needs.check.outputs.alpine_digest }}
+          IMAGE: ghcr.io/${{ github.repository }}
+        run: |
+          set -euo pipefail
+          notes="* qBittorrent ${QBT_VERSION}
+          * libtorrent ${LIBTORRENT_TAG}
+          * alpine:3 @ ${ALPINE_DIGEST}
+          * ${IMAGE}:${QBT_VERSION}"
+          notes=$(printf '%s\n' "${notes}" | sed 's/^[[:space:]]*//')
+          if gh release view "${QBT_VERSION}" >/dev/null 2>&1; then
+            gh release edit "${QBT_VERSION}" --notes "${notes}"
+          else
+            gh release create "${QBT_VERSION}" --title "${QBT_VERSION}" --notes "${notes}"
+          fi

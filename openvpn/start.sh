@@ -25,7 +25,10 @@ export LEGACY_IPTABLES=$(echo "${LEGACY_IPTABLES,,}")
 echo "[INFO] LEGACY_IPTABLES is set to '${LEGACY_IPTABLES}'" | ts '%Y-%m-%d %H:%M:%.S'
 if [[ $LEGACY_IPTABLES == "1" || $LEGACY_IPTABLES == "true" || $LEGACY_IPTABLES == "yes" ]]; then
 	echo "[INFO] Setting iptables to iptables (legacy)" | ts '%Y-%m-%d %H:%M:%.S'
-	update-alternatives --set iptables /usr/sbin/iptables-legacy
+	legacy_iptables=$(command -v iptables-legacy)
+	legacy_ip6tables=$(command -v ip6tables-legacy)
+	ln -sf "${legacy_iptables}" /usr/local/bin/iptables
+	ln -sf "${legacy_ip6tables}" /usr/local/bin/ip6tables
 else
 	echo "[INFO] Not making any changes to iptables version" | ts '%Y-%m-%d %H:%M:%.S'
 fi

@@ -35,14 +35,8 @@ fi
 #	fi
 #done
 
-# identify netmask for docker bridge interface
-docker_mask=$(ifconfig "${docker_interface}" | grep -o "netmask [0-9]*\.[0-9]*\.[0-9]*\.[0-9]*" | grep -o "[0-9]*\.[0-9]*\.[0-9]*\.[0-9]*")
-if [[ "${DEBUG}" == "true" ]]; then
-	echo "[DEBUG] Docker netmask defined as ${docker_mask}" | ts '%Y-%m-%d %H:%M:%.S'
-fi
-
-# convert netmask into cidr format
-docker_network_cidr=$(ipcalc "${docker_ip}" "${docker_mask}" | grep -P -o -m 1 "(?<=Network:)\s+[^\s]+" | sed -e 's~^[ \t]*~~;s~[ \t]*$~~')
+# docker bridge subnet, from the kernel route on that interface
+docker_network_cidr=$(ip -4 route show dev "${docker_interface}" | awk '/proto kernel/ {print $1; exit}')
 echo "[INFO] Docker network defined as ${docker_network_cidr}" | ts '%Y-%m-%d %H:%M:%.S'
 
 # ip route

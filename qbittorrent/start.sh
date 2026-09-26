@@ -1,4 +1,53 @@
 #!/bin/bash
+
+natpmp_enabled() {
+	local flag="${NATPMP_ENABLED,,}"
+	flag=$(echo "${flag}" | sed -e 's~^[ \t]*~~;s~[ \t]*$~~')
+	[[ "${flag}" == "1" || "${flag}" == "true" || "${flag}" == "yes" ]] && [[ "${VPN_TYPE}" == "wireguard" ]]
+}
+
+set_conf_value() {
+	local file="$1"
+	local tmp
+	tmp=$(mktemp)
+	SECTION="$2" KEY="$3" VALUE="$4" awk '
+		BEGIN {
+			section = ENVIRON["SECTION"]
+			key = ENVIRON["KEY"]
+			value = ENVIRON["VALUE"]
+			found = 0
+			in_section = 0
+			section_seen = 0
+		}
+		/^\[/ {
+			if (in_section && !found) {
+				print key "=" value
+				found = 1
+			}
+			in_section = ($0 == "[" section "]")
+			if (in_section) {
+				section_seen = 1
+			}
+		}
+		in_section && index($0, key "=") == 1 {
+			print key "=" value
+			found = 1
+			next
+		}
+		{ print }
+		END {
+			if (!found) {
+				if (!section_seen) {
+					print ""
+					print "[" section "]"
+				}
+				print key "=" value
+			}
+		}
+	' "${file}" > "${tmp}"
+	mv "${tmp}" "${file}"
+}
+
 # Check if /config/qBittorrent exists, if not make the directory
 if [[ ! -e /config/qBittorrent/config ]]; then
 	mkdir -p /config/qBittorrent/config
@@ -96,6 +145,14 @@ else
 	export UMASK="002"
 fi
 
+if natpmp_enabled; then
+	echo "[INFO] NATPMP_ENABLED is set. qBittorrent will use the NAT-PMP forwarded port." | ts '%Y-%m-%d %H:%M:%.S'
+	set_conf_value "/config/qBittorrent/config/qBittorrent.conf" "BitTorrent" 'Session\UseRandomPort' "false"
+	set_conf_value "/config/qBittorrent/config/qBittorrent.conf" "BitTorrent" 'Session\UPnP' "false"
+	set_conf_value "/config/qBittorrent/config/qBittorrent.conf" "Preferences" 'WebUI\LocalHostAuth' "false"
+	chown ${PUID}:${PGID} /config/qBittorrent/config/qBittorrent.conf
+fi
+
 # Start qBittorrent
 echo "[INFO] Starting qBittorrent daemon..." | ts '%Y-%m-%d %H:%M:%.S'
 /bin/bash /etc/qbittorrent/qbittorrent.init start &
@@ -113,10 +170,18 @@ if [ -e /proc/$qbittorrentpid ]; then
 	# trap the TERM signal for propagation and graceful shutdowns
 	handle_term() {
 		echo "[INFO] Received SIGTERM, stopping..." | ts '%Y-%m-%d %H:%M:%.S'
+		if [[ -n "${natpmppid:-}" ]]; then
+			kill "${natpmppid}" 2>/dev/null || true
+		fi
 		/bin/bash /etc/qbittorrent/qbittorrent.init stop
 		exit $?
 	}
 	trap handle_term SIGTERM
+	if natpmp_enabled; then
+		echo "[INFO] Starting NAT-PMP port forward loop..." | ts '%Y-%m-%d %H:%M:%.S'
+		/bin/bash /etc/qbittorrent/natpmp.sh &
+		natpmppid=$!
+	fi
 	if [[ -e /config/qBittorrent/data/logs/qbittorrent.log ]]; then
 		chmod 775 /config/qBittorrent/data/logs/qbittorrent.log
 	fi

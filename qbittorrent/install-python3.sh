@@ -1,14 +1,7 @@
 #!/bin/bash
-if [ ! -e /usr/bin/python3 ]; then
+if ! command -v python3 >/dev/null 2>&1; then
 	echo "[INFO] Python3 not yet installed, installing..." | ts '%Y-%m-%d %H:%M:%.S'
-	apt -qq update \
-	&& apt -y install python3 \
-	&& apt-get clean \
-	&& apt -y autoremove \
-	&& rm -rf \
-	/var/lib/apt/lists/* \
-	/tmp/* \
-	/var/tmp/*
+	apk add --no-cache python3
 else
 	echo "[INFO] Python3 is already installed, nothing to do." | ts '%Y-%m-%d %H:%M:%.S'
 fi

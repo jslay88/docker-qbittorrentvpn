@@ -1,0 +1,52 @@
+name: Keep Repository Active
+
+on:
+  schedule:
+    # Weekly. Public scheduled workflows are disabled after 60 days without
+    # repository activity, and a workflow run by itself does not count.
+    - cron: "0 9 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: keep-active
+  cancel-in-progress: false
+
+jobs:
+  keep-active:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Skip when the repo was pushed recently
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          pushed=$(gh api "repos/${GITHUB_REPOSITORY}" --jq .pushed_at)
+          pushed_epoch=$(date -u -d "${pushed}" +%s)
+          now_epoch=$(date -u +%s)
+          age_days=$(( (now_epoch - pushed_epoch) / 86400 ))
+          echo "Last push was ${age_days} days ago (${pushed})"
+          if (( age_days < 21 )); then
+            echo "skip=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "skip=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Push an empty commit on a temporary branch
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          branch="keep-active-$(date -u +%Y%m%d)"
+          git push origin --delete "${branch}" >/dev/null 2>&1 || true
+          git checkout -b "${branch}"
+          git commit --allow-empty -m "chore: keep repository active"
+          git push --set-upstream origin "${branch}"
+          git push origin --delete "${branch}"
