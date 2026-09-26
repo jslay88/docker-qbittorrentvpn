@@ -54,8 +54,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          auth=(-H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json")
-
           if [[ -n "${REQUESTED_VERSION}" ]]; then
             version="${REQUESTED_VERSION#release-}"
             if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -63,43 +61,54 @@ jobs:
               exit 1
             fi
           else
-            tag=$(curl -fsSL "${auth[@]}" \
-              "https://api.github.com/repos/qbittorrent/qBittorrent/releases?per_page=30" \
-              | jq -r '[.[] | select(.prerelease == false) | select(.tag_name | test("alpha|beta|rc"; "i") | not)][0].tag_name')
+            tag=$(gh api "repos/qbittorrent/qBittorrent/releases?per_page=30" \
+              --jq '[.[] | select(.prerelease == false) | select(.tag_name | test("alpha|beta|rc"; "i") | not)][0].tag_name')
             if [[ -z "${tag}" || "${tag}" == "null" ]]; then
               echo "No stable qBittorrent release found" >&2
               exit 1
             fi
             version="${tag#release-}"
           fi
+          echo "qBittorrent ${version}"
 
-          libtorrent_tag=$(curl -fsSL "${auth[@]}" \
-            "https://api.github.com/repos/arvidn/libtorrent/releases?per_page=100" \
-            | jq -r '[.[] | select(.prerelease == false) | select(.target_commitish == "RC_2_0")][0].tag_name')
+          libtorrent_tag=$(gh api "repos/arvidn/libtorrent/releases?per_page=30" \
+            --jq '[.[] | select(.prerelease == false) | select(.target_commitish == "RC_2_0")][0].tag_name')
           if [[ ! "${libtorrent_tag}" =~ ^v2\.0\.[0-9]+$ ]]; then
             echo "No stable libtorrent RC_2_0 release found (got '${libtorrent_tag}')" >&2
             exit 1
           fi
+          echo "libtorrent ${libtorrent_tag}"
 
-          alpine_digest=$(docker buildx imagetools inspect alpine:3 | awk '/^Digest:/ {print $2; exit}')
+          # Anonymous registry lookup. docker buildx here can print GHCR credentials
+          # from the earlier login, and Actions then kills the step.
+          hub_token=$(curl -fsSL "https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/alpine:pull" | jq -r .token)
+          alpine_digest=$(curl -fsSL -D - -o /dev/null \
+            -H "Authorization: Bearer ${hub_token}" \
+            -H "Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json" \
+            "https://registry-1.docker.io/v2/library/alpine/manifests/3" \
+            | awk 'tolower($1)=="docker-content-digest:" {print $2; exit}' \
+            | tr -d '\r')
           if [[ ! "${alpine_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
             echo "Could not resolve alpine:3 digest (got '${alpine_digest}')" >&2
             exit 1
           fi
+          echo "alpine ${alpine_digest}"
 
           publish=true
           if [[ "${FORCE}" != "true" ]]; then
-            if cfg=$(skopeo inspect "docker://${IMAGE}:${version}" 2>/dev/null); then
-              have_version=$(jq -r '.Labels["org.opencontainers.image.version"] // empty' <<<"${cfg}")
-              have_libtorrent=$(jq -r '.Labels["io.github.jslay88.libtorrent-version"] // empty' <<<"${cfg}")
-              have_digest=$(jq -r '.Labels["org.opencontainers.image.base.digest"] // empty' <<<"${cfg}")
+            if skopeo inspect "docker://${IMAGE}:${version}" > /tmp/skopeo.json 2>/tmp/skopeo.err; then
+              have_version=$(jq -r '.Labels["org.opencontainers.image.version"] // empty' /tmp/skopeo.json)
+              have_libtorrent=$(jq -r '.Labels["io.github.jslay88.libtorrent-version"] // empty' /tmp/skopeo.json)
+              have_digest=$(jq -r '.Labels["org.opencontainers.image.base.digest"] // empty' /tmp/skopeo.json)
               if [[ "${have_version}" == "${version}" && "${have_libtorrent}" == "${libtorrent_tag}" && "${have_digest}" == "${alpine_digest}" ]]; then
                 publish=false
               fi
+            else
+              echo "No published ${version} image yet."
             fi
           fi
 
-          echo "qBittorrent ${version}, libtorrent ${libtorrent_tag}, alpine ${alpine_digest}, publish ${publish}"
+          echo "publish ${publish}"
           {
             echo "publish=${publish}"
             echo "qbt_version=${version}"
