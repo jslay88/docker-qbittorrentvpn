@@ -4,6 +4,8 @@ Modified fork of [DyonR/docker-qbittorrentvpn](https://github.com/DyonR/docker-q
 
 Images are published to `ghcr.io/jslay88/docker-qbittorrentvpn`. The tag is the qBittorrent version (`5.2.3`) plus `latest`. A daily workflow polls qBittorrent releases (there is no way to subscribe to that repo) and rebuilds when qBittorrent, libtorrent 2.0, or `alpine:3` changes. The existing tag is left alone if the build or the WebUI smoke test fails.
 
+The first push can leave the GHCR package private. If `docker pull` asks for a login, set the package to public: https://github.com/users/jslay88/packages/container/docker-qbittorrentvpn/settings
+
 GPL-3.0. Credits: [MarkusMcNugen/docker-qBittorrentvpn](https://github.com/MarkusMcNugen/docker-qBittorrentvpn), [DyonR/docker-qbittorrentvpn](https://github.com/DyonR/docker-qbittorrentvpn).
 
 ## Run

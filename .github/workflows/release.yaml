@@ -212,11 +212,17 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          set -euo pipefail
+          set +e
           gh api --method PUT \
             -H "Accept: application/vnd.github+json" \
             "/user/packages/container/docker-qbittorrentvpn/visibility" \
             -f visibility=public
+          status=$?
+          set -e
+          if [[ "${status}" -ne 0 ]]; then
+            echo "Could not mark the package public from Actions."
+            echo "Set it public once: https://github.com/users/${{ github.repository_owner }}/packages/container/docker-qbittorrentvpn/settings"
+          fi
 
       - name: GitHub release
         env:
