@@ -70,7 +70,6 @@ ARG ALPINE_DIGEST=
 
 RUN apk add --no-cache \
 		bash \
-		boost \
 		ca-certificates \
 		curl \
 		dos2unix \
@@ -85,7 +84,6 @@ RUN apk add --no-cache \
 		openresolv \
 		openssl \
 		openvpn \
-		procps \
 		qt6-qtbase \
 		qt6-qtbase-sqlite \
 		shadow \

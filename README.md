@@ -2,9 +2,7 @@
 
 Modified fork of [DyonR/docker-qbittorrentvpn](https://github.com/DyonR/docker-qbittorrentvpn). Alpine base, qBittorrent and libtorrent compiled from source, WireGuard or OpenVPN, and an iptables killswitch.
 
-Images are published to `ghcr.io/jslay88/docker-qbittorrentvpn`. The tag is the qBittorrent version (`5.2.3`) plus `latest`. A daily workflow polls qBittorrent releases (there is no way to subscribe to that repo) and rebuilds when qBittorrent, libtorrent 2.0, or `alpine:3` changes. The existing tag is left alone if the build or the WebUI smoke test fails.
-
-The first push can leave the GHCR package private. If `docker pull` asks for a login, set the package to public: https://github.com/users/jslay88/packages/container/docker-qbittorrentvpn/settings
+Images are published to `ghcr.io/jslay88/docker-qbittorrentvpn`. Tags are the qBittorrent version (`5.2.3`) and `latest`. A daily check rebuilds when qBittorrent, libtorrent 2.0, or `alpine:3` changes. A failed build or WebUI smoke test does not replace the existing tag.
 
 GPL-3.0. Credits: [MarkusMcNugen/docker-qBittorrentvpn](https://github.com/MarkusMcNugen/docker-qBittorrentvpn), [DyonR/docker-qbittorrentvpn](https://github.com/DyonR/docker-qbittorrentvpn).
 
@@ -24,9 +22,27 @@ docker run -d \
   ghcr.io/jslay88/docker-qbittorrentvpn:latest
 ```
 
-WireGuard config goes in `/config/wireguard/wg0.conf`. OpenVPN config goes in `/config/openvpn/` and must end in `.ovpn`.
-
 On first start, qBittorrent prints a temporary WebUI password in the container log. Username from the template is `admin`.
+
+## Volumes
+
+Mount both of these. The container does not keep anything else.
+
+| Path | What is stored |
+|---|---|
+| `/config` | qBittorrent profile, VPN config, and the WebUI certificate when `ENABLE_SSL` is set |
+| `/downloads` | Torrent data. The template save path is `/downloads` and the temp path is `/downloads/temp` |
+
+`/config` layout:
+
+- `/config/qBittorrent/config/qBittorrent.conf` is copied from the template on first start. Resume data and logs are under `/config/qBittorrent/data/`.
+- WireGuard config is `/config/wireguard/wg0.conf`. The file has to be named `wg0.conf`.
+- OpenVPN configs go in `/config/openvpn/` and must end in `.ovpn`. `VPN_USERNAME` and `VPN_PASSWORD` are written to `/config/openvpn/credentials.conf`.
+- `ENABLE_SSL` writes `/config/qBittorrent/config/WebUICertificate.crt` and `WebUIKey.key` when those files are missing.
+
+qBittorrent runs as `PUID`:`PGID` (root if unset). The mounted directories should be owned by that user and group.
+
+If you point the save path at something other than `/downloads`, mount that path too. Otherwise the data is gone when the container is removed.
 
 ## NAT-PMP
 
@@ -51,6 +67,7 @@ While this is on, localhost inside the container can call the WebUI API without 
 | `VPN_TYPE` | yes | `wireguard` or `openvpn` | `openvpn` |
 | `LAN_NETWORK` | yes, when the VPN is on | Comma-separated CIDRs that should bypass the tunnel | |
 | `VPN_USERNAME` / `VPN_PASSWORD` | no | Written into the OpenVPN credentials file | |
+| `VPN_OPTIONS` | no | Extra arguments appended to the `openvpn` command | |
 | `NAME_SERVERS` | no | Comma-separated resolvers | `1.1.1.1,8.8.8.8,1.0.0.1,8.8.4.4` |
 | `PUID` / `PGID` | no | User and group for `/config` and `/downloads` | `root` |
 | `UMASK` | no | | `002` |
